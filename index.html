@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es-ES">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mi Estilo</title>
+  <meta name="description" content="Tu asesor de imagen personal: look, pelo y prueba de peinados con IA.">
+  <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Mi Estilo">
+  <meta name="referrer" content="no-referrer">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" sizes="192x192">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" aria-live="polite"></div>
+  <nav id="tabs" class="tabs hidden" aria-label="Secciones">
+    <a href="#/inicio" data-tab="inicio"><span class="ti">🏠</span><span>Inicio</span></a>
+    <a href="#/look" data-tab="look"><span class="ti">👔</span><span>Mi look</span></a>
+    <a href="#/pelo" data-tab="pelo"><span class="ti">💈</span><span>Mi pelo</span></a>
+    <a href="#/probar" data-tab="probar"><span class="ti">✨</span><span>Probar</span></a>
+    <a href="#/historial" data-tab="historial"><span class="ti">🗂️</span><span>Historial</span></a>
+  </nav>
+  <div id="overlay" class="overlay hidden" role="dialog" aria-modal="true"></div>
+  <div id="toast" class="toast" role="status"></div>
+  <noscript>Mi Estilo necesita JavaScript activado.</noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
