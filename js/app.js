@@ -1,9 +1,9 @@
 import * as db from './db.js';
 import * as api from './api.js';
 import { prepare, thumbnail, sizeOf, blobToDataURL, PhotoError } from './image.js';
-import { LOOK_SCHEMA, LOOK_SYSTEM, lookUserText, HAIR_SCHEMA, HAIR_SYSTEM, hairUserText, HAIR_PRESETS, editPrompt } from './prompts.js';
+import { LOOK_SCHEMA, LOOK_SYSTEM, lookUserText, HAIR_SCHEMA, HAIR_SYSTEM, hairUserText, HAIR_PRESETS, editPrompt, refEditPrompt, COMPARE_SCHEMA, COMPARE_SYSTEM, compareUserText } from './prompts.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 // ------------------------------------------------------------------ utilidades
 const $ = (s, r = document) => r.querySelector(s);
@@ -44,7 +44,7 @@ const state = {
   hasKey: false, keyHint: '',
   look: { photo: null, occasion: '', weather: '', question: '' },
   hair: { photo: null, question: '' },
-  tryOn: { photo: null, choice: null, custom: '', fromId: null },
+  tryOn: { photo: null, ref: null, copyColor: false, choice: null, custom: '', fromId: null },
   urls: []
 };
 function objUrl(blob) { const u = URL.createObjectURL(blob); state.urls.push(u); return u; }
@@ -230,10 +230,10 @@ routes.inicio = async (v) => {
 };
 
 // ------------------------------------------------------------------ selector de foto (reutilizable)
-function photoPicker(id, photo, { front = false, hint } = {}) {
+function photoPicker(id, photo, { front = false, hint, alt = 'Tu foto', icon } = {}) {
   return `<div class="picker ${photo ? 'has' : ''}" id="${id}">
-    ${photo ? `<div class="pv"><img src="${photo.url}" alt="Tu foto"><button class="pv-x" data-pick="clear" aria-label="Quitar foto">✕</button></div>` :
-      `<div class="pk-empty"><span class="pk-ic">${front ? '🤳' : '📸'}</span><p>${esc(hint)}</p></div>`}
+    ${photo ? `<div class="pv"><img src="${photo.url}" alt="${alt}"><button class="pv-x" data-pick="clear" aria-label="Quitar foto">✕</button></div>` :
+      `<div class="pk-empty"><span class="pk-ic">${icon || (front ? '🤳' : '📸')}</span><p>${esc(hint)}</p></div>`}
     <div class="row2">
       <label class="btn btn-navy big"><input type="file" accept="image/*" capture="${front ? 'user' : 'environment'}" data-pick="cam" hidden>📷 ${photo ? 'Repetir' : 'Cámara'}</label>
       <label class="btn btn-ghost big"><input type="file" accept="image/*" data-pick="gal" hidden>🖼️ Galería</label>
@@ -247,10 +247,11 @@ function bindPicker(root, onPhoto) {
     if (!inp || !inp.files || !inp.files[0]) return;
     const f = inp.files[0];
     inp.value = '';
-    try { onPhoto(await prepare(f)); }
+    const pid = (inp.closest('.picker') || {}).id;
+    try { onPhoto(await prepare(f), pid); }
     catch (err) { toast(err.message, 4200); }
   });
-  root.addEventListener('click', (e) => { if (e.target.closest('[data-pick="clear"]')) onPhoto(null); });
+  root.addEventListener('click', (e) => { const x = e.target.closest('[data-pick="clear"]'); if (x) onPhoto(null, (x.closest('.picker') || {}).id); });
 }
 
 function chips(group, options, selected) {
@@ -406,6 +407,18 @@ routes.probar = async (v, arg) => {
     v.innerHTML = `${header('Probar <em>peinado</em>', 'Mira cómo te quedaría antes de ir al barbero')}
       ${keyBanner()}
       ${photoPicker('pk', T.photo, { front: true, hint: 'Foto de frente, cabeza y hombros. Si ya analizaste tu pelo, se usa esa foto.' })}
+      <div class="card form-card ref-card">
+        <h3>Foto de referencia (estilo a copiar) <small>(opcional)</small></h3>
+        <p class="muted small">Un famoso, una revista, una foto de Instagram… Copiamos su peinado en tu foto y te decimos si te favorece.</p>
+        ${photoPicker('pkr', T.ref, { hint: 'Foto donde se vea bien el peinado que te gusta.', alt: 'Referencia', icon: '💇' })}
+        ${T.ref ? `<label class="tgl"><input type="checkbox" id="col" ${T.copyColor ? 'checked' : ''}> Copiar también el color</label>` : ''}
+      </div>
+      ${T.ref ? `<div id="err"></div>
+      <button class="btn btn-gold big wide" id="goref" ${T.photo ? '' : 'disabled'}>✂️ Copiar este peinado</button>
+      <p class="cost-note">Tarda 20–60 s · ${api.fmtEur(api.estimateEur('edit', settings))} · ${esc(settings.imageModel)}</p>
+      <button class="btn btn-navy big wide" id="cmp" ${T.photo ? '' : 'disabled'}>🔍 Comparar con mi pelo</button>
+      <p class="cost-note">Diferencias, si te favorece y qué pedir al barbero · ${api.fmtEur(api.estimateEur('hair', settings))}</p>
+      <h3 class="sec-title">…o prueba otro peinado</h3>` : ''}
       <div class="card form-card">
         <h3>Elige un peinado</h3>
         ${cuts.length ? '<p class="muted small">⭐ Recomendados en tu último análisis</p>' : ''}
@@ -413,8 +426,8 @@ routes.probar = async (v, arg) => {
         <h3>…o escríbelo tú</h3>
         <textarea id="custom" rows="2" maxlength="300" placeholder="Por ejemplo: más corto a los lados y peinado hacia atrás">${esc(T.custom)}</textarea>
       </div>
-      <div id="err"></div>
-      <button class="btn btn-gold big wide" id="go" ${T.photo ? '' : 'disabled'}>✦ Generar peinado</button>
+      ${T.ref ? '' : '<div id="err"></div>'}
+      <button class="btn ${T.ref ? 'btn-ghost' : 'btn-gold'} big wide" id="go" ${T.photo ? '' : 'disabled'}>✦ Generar peinado</button>
       <p class="cost-note">Tarda 20–60 s · coste aproximado ${api.fmtEur(api.estimateEur('edit', settings))} · ${esc(settings.imageModel)}</p>`;
     $('#opts', v).onclick = (e) => {
       const b = e.target.closest('.chip'); if (!b) return;
@@ -423,8 +436,57 @@ routes.probar = async (v, arg) => {
     };
     $('#custom', v).oninput = (e) => { T.custom = e.target.value; if (T.custom.trim()) $$('.chip', $('#opts', v)).forEach((x) => x.classList.remove('on')); };
     $('#go', v).onclick = runEdit;
+    if (T.ref) {
+      $('#goref', v).onclick = runRefEdit;
+      $('#cmp', v).onclick = runCompare;
+      $('#col', v).onchange = (e) => { T.copyColor = e.target.checked; };
+    }
   };
-  bindPicker(v, (p) => { T.photo = p; T.fromId = null; draw(); });
+  bindPicker(v, (p, pid) => { if (pid === 'pkr') T.ref = p; else { T.photo = p; T.fromId = null; } draw(); });
+
+  const fail = (err, prog) => {
+    prog && prog.done();
+    if (err.kind === 'abort') return toast('Cancelado');
+    $('#err', v).innerHTML = errorCard(err);
+    $('#err', v).scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  async function runRefEdit() {
+    $('#err', v).innerHTML = '';
+    let prog;
+    try {
+      const key = await getKeyOrFail();
+      prog = showProgress({ title: 'Copiando el peinado', sub: 'Aplicando la referencia a tu foto', estimate: [25, 75] });
+      const note = T.custom.trim();
+      const r = await api.editImage({
+        key, models: [settings.imageModel, settings.imageFallback], blob: T.photo.blob, refBlob: T.ref.blob, w: T.photo.w, h: T.photo.h,
+        prompt: refEditPrompt({ copyColor: T.copyColor, note }), quality: settings.imageQuality, signal: prog.signal
+      });
+      prog.done();
+      addStat('edit', r.cost);
+      const label = 'Peinado de la referencia' + (T.copyColor ? ' (con color)' : '');
+      const item = { id: uid(), type: 'edit', date: Date.now(), photo: T.photo.blob, after: r.blob, ref: T.ref.blob, thumb: await thumbnail(r.blob), label, request: note, model: r.model, cost: r.cost };
+      await db.histPut(item); await db.histPrune();
+      location.hash = '#/r/' + item.id;
+    } catch (err) { fail(err, prog); }
+  }
+  async function runCompare() {
+    $('#err', v).innerHTML = '';
+    let prog;
+    try {
+      const key = await getKeyOrFail();
+      prog = showProgress({ title: 'Comparando peinados', sub: 'Tu pelo frente a la referencia', estimate: [15, 50] });
+      const dataUrls = [await blobToDataURL(T.photo.blob), await blobToDataURL(T.ref.blob)];
+      const r = await api.analyze({
+        key, models: [settings.visionModel, settings.visionFallback], reasoning: settings.reasoning,
+        system: COMPARE_SYSTEM, userText: compareUserText({ note: T.custom.trim() }), dataUrls, schema: COMPARE_SCHEMA, schemaName: 'comparar_peinado', signal: prog.signal
+      });
+      prog.done();
+      addStat('hair', r.cost);
+      const item = { id: uid(), type: 'compare', date: Date.now(), photo: T.photo.blob, ref: T.ref.blob, thumb: await thumbnail(T.ref.blob), result: r.result, model: r.model, cost: r.cost };
+      await db.histPut(item); await db.histPrune();
+      location.hash = '#/r/' + item.id;
+    } catch (err) { fail(err, prog); }
+  }
   draw();
 
   async function runEdit() {
@@ -455,9 +517,9 @@ routes.probar = async (v, arg) => {
 };
 
 // ------------------------------------------------------------------ HISTORIAL
-const TYPE_LABEL = { look: 'Look', hair: 'Pelo', edit: 'Peinado' };
+const TYPE_LABEL = { look: 'Look', hair: 'Pelo', edit: 'Peinado', compare: 'Comparar' };
 function histCard(it) {
-  const sub = it.type === 'look' ? (it.result && it.result.veredicto) : it.type === 'hair' ? (it.result && it.result.corte_actual && it.result.corte_actual.valoracion) : it.label;
+  const sub = it.type === 'look' ? (it.result && it.result.veredicto) : it.type === 'hair' ? (it.result && it.result.corte_actual && it.result.corte_actual.valoracion) : it.type === 'compare' ? (it.result && it.result.estilo_referencia) : it.label;
   const score = it.type === 'look' && it.result ? it.result.puntuacion : it.type === 'hair' && it.result && it.result.corte_actual ? it.result.corte_actual.puntuacion : null;
   return `<div class="hist pop" data-id="${it.id}">
     <a class="h-main" href="#/r/${it.id}">
@@ -499,6 +561,7 @@ routes.r = async (v, id) => {
   if (!it) { v.innerHTML = `${header('No encontrado', '', { back: true })}<div class="empty card"><p>Este elemento ya no existe.</p></div>`; return; }
   if (it.type === 'look') renderLook(v, it);
   else if (it.type === 'hair') renderHair(v, it);
+  else if (it.type === 'compare') renderCompare(v, it);
   else renderEdit(v, it);
 };
 
@@ -600,6 +663,32 @@ function renderHair(v, it) {
   $('#copy', v).onclick = async () => { try { await navigator.clipboard.writeText(ba.frase || ''); toast('Frase copiada'); } catch (_) { toast('No se pudo copiar'); } };
 }
 
+function renderCompare(v, it) {
+  const r = it.result || {};
+  const head = header('Comparar <em>peinado</em>', esc(r.estilo_referencia || ''), { back: true });
+  const pair = `<div class="pair pop"><figure><img src="${objUrl(it.photo)}" alt="Tu pelo"><figcaption>Tú ahora</figcaption></figure><figure><img src="${objUrl(it.ref)}" alt="Referencia"><figcaption>Referencia</figcaption></figure></div>`;
+  if (r.fotos_validas === false) { v.innerHTML = head + pair + `<div class="card err-card pop"><div class="err-ic">📷</div><div><h3>Alguna foto no sirve</h3><p>${esc(r.problema_foto)}</p><a class="btn btn-gold sm" href="#/probar">Cambiar fotos</a></div></div>`; return; }
+  const lf = r.le_favorece || {}, ba = r.barbero || {};
+  v.innerHTML = `${head}${pair}
+    <div class="card pop score-card">${ring(lf.puntuacion)}<div><h3>¿Te favorece?</h3><p>${esc(lf.adaptacion)}</p></div></div>
+    <div class="card pop"><h3 class="ch"><span>↔️</span>Diferencias</h3>
+      ${(r.diferencias || []).map((d) => `<div class="diff"><h4>${esc(d.aspecto)}</h4><div class="facts f3"><div><small>Tú</small><b>${esc(d.tu_pelo)}</b></div><div><small>Referencia</small><b>${esc(d.referencia)}</b></div></div></div>`).join('')}</div>
+    <div class="card pop"><h3 class="ch"><span>🙂</span>Para ti</h3>
+      <p><b>Forma de cara:</b> ${esc(lf.forma_cara)}</p><p><b>Tipo de pelo:</b> ${esc(lf.tipo_pelo)}</p><p><b>Edad y estilo:</b> ${esc(lf.edad)}</p></div>
+    <div class="card pop barber"><h3 class="ch"><span>💈</span>Qué pedirle al barbero</h3>
+      <blockquote>«${esc(ba.frase)}»</blockquote>
+      <button class="btn btn-ghost sm" id="copy">📋 Copiar frase</button>
+      <div class="facts f1"><div><small>Laterales</small><b>${esc(ba.laterales)}</b></div><div><small>Arriba</small><b>${esc(ba.arriba)}</b></div><div><small>Nuca</small><b>${esc(ba.nuca)}</b></div></div></div>
+    <div class="card pop"><h3 class="ch"><span>🏠</span>Cómo peinarlo</h3>
+      <ol class="steps">${(r.pasos || []).map((p) => `<li><b>${esc(p.titulo)}</b><p>${esc(p.detalle)}</p></li>`).join('')}</ol></div>
+    <div class="card pop"><h3 class="ch"><span>🧴</span>Productos</h3>
+      ${(r.productos || []).map((p) => `<div class="prod"><h4>${esc(p.producto)}</h4><p class="small"><b>Cantidad:</b> ${esc(p.cantidad)}</p><p class="tip">👉 ${esc(p.como)}</p></div>`).join('')}</div>
+    <div class="card pop"><h3 class="ch"><span>🗓️</span>Mantenimiento</h3><p>${esc(r.mantenimiento)}</p></div>
+    <a class="btn btn-gold big wide" href="#/probar">✂️ Probar este peinado en mi foto</a>
+    ${footer(it)}`;
+  $('#copy', v).onclick = async () => { try { await navigator.clipboard.writeText(ba.frase || ''); toast('Frase copiada'); } catch (_) { toast('No se pudo copiar'); } };
+}
+
 function renderEdit(v, it) {
   const before = objUrl(it.photo), after = objUrl(it.after);
   v.innerHTML = `${header('Tu nuevo <em>peinado</em>', esc(it.label || ''), { back: true })}
@@ -613,6 +702,7 @@ function renderEdit(v, it) {
     <p class="muted small center">Desliza para comparar antes y después</p>
     <div class="row2"><button class="btn btn-navy big" id="save">⬇️ Guardar</button><button class="btn btn-gold big" id="share">📤 Compartir</button></div>
     <div class="row2"><button class="btn btn-ghost big" id="only">👁️ Ver solo después</button><a class="btn btn-ghost big" href="#/probar">✨ Probar otro</a></div>
+    ${it.ref ? `<div class="card pop ref-thumb"><img src="${objUrl(it.ref)}" alt="Referencia"><div><p class="small"><b>Referencia copiada</b></p><p class="small muted">Peinado adaptado a tu cabeza y entradas.</p></div></div>` : ''}
     <div class="card pop"><p class="small"><b>Peinado:</b> ${esc(it.label || '')}</p><p class="small muted">Es una simulación hecha por IA: úsala como idea para hablar con tu barbero.</p></div>
     ${footer(it)}`;
   const ba = $('#ba', v), bar = $('#bar', v);

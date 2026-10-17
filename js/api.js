@@ -112,13 +112,14 @@ export function fmtEur(v) {
 // ---------- Análisis de imagen con salida JSON estructurada (Responses API) ----------
 const isReasoning = (m) => /^(gpt-5|o\d)/.test(m) && !/chat/.test(m);
 
-async function responsesOnce({ key, model, reasoning, system, userText, dataUrl, schema, schemaName, signal, useReasoning = true }) {
+async function responsesOnce({ key, model, reasoning, system, userText, dataUrl, dataUrls, schema, schemaName, signal, useReasoning = true }) {
+  const imgs = dataUrls && dataUrls.length ? dataUrls : [dataUrl];
   const body = {
     model,
     instructions: system,
     input: [{ role: 'user', content: [
       { type: 'input_text', text: userText },
-      { type: 'input_image', image_url: dataUrl, detail: 'high' }
+      ...imgs.map((u) => ({ type: 'input_image', image_url: u, detail: 'high' }))
     ] }],
     text: { format: { type: 'json_schema', name: schemaName, strict: true, schema } },
     max_output_tokens: 12000,
@@ -130,7 +131,7 @@ async function responsesOnce({ key, model, reasoning, system, userText, dataUrl,
     data = await request('/responses', { key, json: body, signal });
   } catch (e) {
     if (e.kind === 'bad' && /reasoning/.test(e.param || '') && useReasoning) {
-      return responsesOnce({ key, model, reasoning, system, userText, dataUrl, schema, schemaName, signal, useReasoning: false });
+      return responsesOnce({ key, model, reasoning, system, userText, dataUrl, dataUrls, schema, schemaName, signal, useReasoning: false });
     }
     if (e.kind === 'bad' && /image|modalit|vision/i.test(e.raw || '')) { e.kind = 'model'; }
     if (e.kind === 'model') e.message = `Tu clave no tiene acceso al modelo ${model} o no admite fotos. Elige otro en Ajustes.`;
@@ -169,10 +170,16 @@ function pickSize(w, h) {
   return '1024x1024';
 }
 
-async function editOnce({ key, model, blob, w, h, prompt, quality, signal, minimal = false }) {
+// refBlob opcional: segunda imagen de referencia (images/edits admite hasta 16 con image[]).
+async function editOnce({ key, model, blob, refBlob, w, h, prompt, quality, signal, minimal = false }) {
   const f = new FormData();
   f.append('model', model);
-  f.append('image', blob, 'foto.jpg');
+  if (refBlob) {
+    f.append('image[]', blob, 'foto.jpg');
+    f.append('image[]', refBlob, 'referencia.jpg');
+    // input_fidelity solo en gpt-image-1 / 1.5 (gpt-image-2 ya es alta fidelidad; 1-mini solo "low").
+    if (!minimal && /^gpt-image-1(\.5)?$/.test(model)) f.append('input_fidelity', 'high');
+  } else f.append('image', blob, 'foto.jpg');
   f.append('prompt', prompt);
   f.append('n', '1');
   f.append('size', pickSize(w, h));
@@ -189,8 +196,8 @@ async function editOnce({ key, model, blob, w, h, prompt, quality, signal, minim
     const type = b.startsWith('/9j') ? 'image/jpeg' : b.startsWith('iVBOR') ? 'image/png' : b.startsWith('UklGR') ? 'image/webp' : 'image/jpeg';
     return { blob: b64ToBlob(item.b64_json, type), usage: data.usage || null, model, cost: imageCostEur(model, data.usage) };
   } catch (e) {
-    if (e.kind === 'bad' && !minimal && /quality|output_format|output_compression|size/.test(e.param || e.raw || '')) {
-      return editOnce({ key, model, blob, w, h, prompt, quality, signal, minimal: true });
+    if (e.kind === 'bad' && !minimal && /quality|output_format|output_compression|size|input_fidelity/.test(e.param || e.raw || '')) {
+      return editOnce({ key, model, blob, refBlob, w, h, prompt, quality, signal, minimal: true });
     }
     if (e.kind === 'model') e.message = `Tu clave no tiene acceso al modelo de imagen ${model}. Elige otro en Ajustes.`;
     throw e;

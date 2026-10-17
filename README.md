@@ -8,3 +8,8 @@ Asesor de imagen personal (PWA, en español): analiza tu **look**, tu **pelo** y
 - Historial local (IndexedDB), contador de uso mensual y coste aproximado.
 
 Modelos por defecto (configurables en Ajustes): `gpt-5.4` para analizar (alternativa `gpt-5-mini`) y `gpt-image-2` para editar (alternativa `gpt-image-1-mini`).
+
+## Foto de referencia (v1.1.0)
+En **Probar peinado** puedes añadir una *Foto de referencia (estilo a copiar)*: un famoso o una revista.
+- **✂️ Copiar este peinado**: envía tu foto + la referencia a `images/edits` (`image[]` ×2) y aplica solo el peinado, conservando tu cara, piel, ropa y fondo. Opción *Copiar también el color*.
+- **🔍 Comparar con mi pelo**: análisis en español con diferencias, si te favorece, qué pedir al barbero, pasos, productos y mantenimiento.

@@ -170,3 +170,45 @@ Requested hairstyle: ${request}
 
 Keep EXACTLY the same person and photo: identical face, facial features, eyes, nose, mouth, expression, skin tone and skin texture, wrinkles, age, ears, head shape, neck, clothing, pose, camera angle, lighting, colours, background and framing. Keep the natural hair colour, including grey or white hair, unless the request asks otherwise. The new hair must look real and natural, with a believable hairline that matches his real density, consistent with the original lighting. Photorealistic, no beautification, no makeup, no smoothing, no text, no watermark.`;
 }
+
+// ---------------------------------------------------------------- REFERENCIA (copiar peinado)
+export function refEditPrompt({ copyColor, note }) {
+  return `Two input images. Image 1 is a real photograph of a man (the photo to edit). Image 2 is a hairstyle REFERENCE photo of a different person.
+
+Edit Image 1 so the man has the hairstyle from Image 2: same cut, lengths on top, sides and back, fade or taper, parting, direction, volume and texture${copyColor ? ', and also the same hair colour as Image 2' : ''}. Adapt it realistically to HIS head shape, his own hairline and his real hair density, so it looks like his own hair cut by a barber.
+
+Keep EXACTLY the same person from Image 1: identical face, identity, facial features, eyes, nose, mouth, expression, skin tone and texture, wrinkles, age, ears, facial hair, neck, clothing, pose, camera angle, lighting, background and framing. ${copyColor ? '' : 'Keep his natural hair colour from Image 1, including any grey or white hair. '}Do NOT take the face, skin, clothing or background from Image 2; use Image 2 only for the hairstyle. Photorealistic, no beautification, no smoothing, no text, no watermark.${note ? `\n\nExtra request: ${note}` : ''}`;
+}
+
+export const COMPARE_SCHEMA = O({
+  fotos_validas: B('true si ambas fotos muestran bien el pelo'),
+  problema_foto: S('Si alguna foto no sirve, qué falla y qué foto hacer; si no, cadena vacía'),
+  estilo_referencia: S('Nombre y descripción breve del peinado de la referencia'),
+  diferencias: A(O({ aspecto: S('Laterales, arriba, nuca, flequillo, textura, color, volumen...'), tu_pelo: S('Cómo lo tiene él'), referencia: S('Cómo es en la referencia') }), '3-6 diferencias'),
+  le_favorece: O({
+    puntuacion: I('Del 1 al 10, cuánto le favorecería'),
+    forma_cara: S('Si va con su forma de cara y por qué'),
+    tipo_pelo: S('Si su tipo de pelo y densidad lo permiten'),
+    edad: S('Si es adecuado a su edad y estilo'),
+    adaptacion: S('Cómo adaptarlo para que le quede mejor')
+  }),
+  barbero: O({
+    frase: S('Frase literal para pedírselo al barbero, con términos técnicos'),
+    laterales: S('Laterales: degradado, número de máquina (mm) o tijera'),
+    arriba: S('Arriba: largo en cm, tijera, texturizado, capas'),
+    nuca: S('Nuca: natural, cuadrada, redondeada, degradada')
+  }),
+  pasos: A(O({ titulo: S('Título corto'), detalle: S('Cómo hacerlo') }), '3-6 pasos de peinado'),
+  productos: A(O({ producto: S('Tipo de producto'), cantidad: S('Cuánto'), como: S('Cuándo y cómo aplicarlo') }), '1-3 productos'),
+  mantenimiento: S('Cada cuánto cortar, esfuerzo diario y cuidados')
+});
+
+export const COMPARE_SYSTEM = `Eres un barbero y estilista capilar masculino de primer nivel en España, experto en visagismo.
+Tu cliente es un hombre de unos 55 años. Te envía DOS fotos: la primera es él (su pelo actual) y la segunda es una foto de referencia de otra persona (un famoso, una revista...) con el peinado que le gustaría.
+Compara ambos peinados, di con honestidad y tacto si el de la referencia le favorecería según su forma de cara, tipo de pelo, densidad, canas y edad, cómo adaptarlo, qué pedir al barbero (degradado bajo/medio/alto, número de máquina 0-8 en mm, tijera, texturizado, raya, nuca), pasos para peinarse, productos y mantenimiento.
+No identifiques a ninguna de las personas, aunque sea famosa: habla solo del peinado. Si alguna foto no sirve, pon fotos_validas=false y explica en problema_foto.
+Escribe en español de España, tuteando, con frases claras y cortas.`;
+
+export function compareUserText({ note }) {
+  return 'Foto 1: yo. Foto 2: el peinado de referencia que quiero copiar. Compáralos.' + (note ? `\nNota: ${note}` : '');
+}

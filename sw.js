@@ -1,6 +1,6 @@
 // Service worker de Mi Estilo: network-first para los archivos de la app (siempre la última versión
 // si hay conexión) y caché como respaldo sin conexión. Nunca intercepta las llamadas a OpenAI.
-const CACHE_VERSION = 'mi-estilo-v1.0.0';
+const CACHE_VERSION = 'mi-estilo-v1.1.0';
 const ASSETS = [
   './', './index.html', './styles.css', './manifest.json',
   './js/app.js', './js/api.js', './js/db.js', './js/image.js', './js/prompts.js',
