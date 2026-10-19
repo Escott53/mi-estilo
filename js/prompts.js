@@ -148,8 +148,17 @@ Reglas:
 - No identifiques a la persona.
 - Escribe en español de España, tuteando, con frases claras y cortas.`;
 
-export function hairUserText({ question }) {
-  return 'Analiza mi pelo y mi peinado en esta foto.' + (question ? `\nMi pregunta: ${question}` : '');
+// Describe el conjunto de fotos (ángulos) para el modelo de visión.
+export function photosLegend(labels, refLabels = []) {
+  const own = labels.map((l, i) => `Foto ${i + 1}: yo, ${l}`);
+  const refs = refLabels.map((l, i) => `Foto ${labels.length + i + 1}: REFERENCIA (otra persona, el peinado que quiero copiar), ${l}`);
+  return [...own, ...refs].join('\n');
+}
+const MULTI_HINT = 'Usa TODAS las fotos a la vez: la de frente para forma de cara, línea frontal/entradas y simetría; el perfil para laterales, patillas, volumen arriba y nuca; la de atrás/coronilla para coronilla (remolinos, clareo), nuca y densidad. Si algún ángulo no está, dilo y no inventes lo que no se ve.';
+
+export function hairUserText({ question, labels }) {
+  const multi = labels && labels.length > 1;
+  return (multi ? `Analiza mi pelo y mi peinado con estas ${labels.length} fotos del mismo momento:\n${photosLegend(labels)}\n${MULTI_HINT}` : 'Analiza mi pelo y mi peinado en esta foto.') + (question ? `\nMi pregunta: ${question}` : '');
 }
 
 // ---------------------------------------------------------------- EDICIÓN
@@ -163,7 +172,22 @@ export const HAIR_PRESETS = [
   { label: 'Sin barba', text: 'afeitado completo, sin barba ni bigote' }
 ];
 
-export function editPrompt(request) {
+// Texto que explica qué imagen se edita y cuáles son solo contexto (images/edits con varias imágenes).
+function ctxBlock(ownLabels, refLabels) {
+  const lines = [`Image 1 is THE PHOTO TO EDIT: a real photograph of a man (${ownLabels[0]}). The output must be Image 1 edited, with the same framing and angle as Image 1.`];
+  ownLabels.slice(1).forEach((l, i) => lines.push(`Image ${i + 2} is the SAME man from another angle (${l}). Context only: use it to understand his real hair density, crown, hairline, nape and head shape. Do not output it.`));
+  refLabels.forEach((l, i) => lines.push(`Image ${ownLabels.length + i + 1} is a hairstyle REFERENCE of a DIFFERENT person (${l}). Use it only for the hairstyle.`));
+  return lines.join('\n');
+}
+
+export function editPrompt(request, ownLabels = ['front']) {
+  if (ownLabels.length > 1) {
+    return `${ctxBlock(ownLabels, [])}
+
+Edit Image 1: change ONLY the hairstyle (and facial hair only if explicitly requested). Requested hairstyle: ${request}
+
+Keep EXACTLY the same person and photo of Image 1: identical face, features, expression, skin, wrinkles, age, ears, head shape, clothing, pose, camera angle, lighting, background and framing. Keep his natural hair colour, including grey or white hair, unless asked otherwise. The new hair must look real, with a hairline and density consistent with what the other angles show. Photorealistic, no beautification, no text, no watermark.`;
+  }
   return `Edit this real photograph. Change ONLY the hairstyle (and facial hair only if explicitly requested) of the person.
 
 Requested hairstyle: ${request}
@@ -172,7 +196,14 @@ Keep EXACTLY the same person and photo: identical face, facial features, eyes, n
 }
 
 // ---------------------------------------------------------------- REFERENCIA (copiar peinado)
-export function refEditPrompt({ copyColor, note }) {
+export function refEditPrompt({ copyColor, note, ownLabels, refLabels }) {
+  if (ownLabels && (ownLabels.length > 1 || (refLabels && refLabels.length > 1))) {
+    return `${ctxBlock(ownLabels, refLabels)}
+
+Edit Image 1 so the man has the hairstyle shown in the reference image(s): same cut, lengths on top, sides and back, fade or taper, parting, direction, volume and texture${copyColor ? ', and also the same hair colour as the reference' : ''}. Combine the reference angles to understand the style in 3D and render it as seen from Image 1's angle. Adapt it realistically to HIS head shape, hairline and real density (see his other angles).
+
+Keep EXACTLY the same person and photo of Image 1: identical face, identity, features, expression, skin, wrinkles, age, ears, facial hair, clothing, pose, camera angle, lighting, background and framing. ${copyColor ? '' : 'Keep his natural hair colour, including grey or white hair. '}Never take the face, skin, clothing or background from any reference. Photorealistic, no beautification, no text, no watermark.${note ? `\n\nExtra request: ${note}` : ''}`;
+  }
   return `Two input images. Image 1 is a real photograph of a man (the photo to edit). Image 2 is a hairstyle REFERENCE photo of a different person.
 
 Edit Image 1 so the man has the hairstyle from Image 2: same cut, lengths on top, sides and back, fade or taper, parting, direction, volume and texture${copyColor ? ', and also the same hair colour as Image 2' : ''}. Adapt it realistically to HIS head shape, his own hairline and his real hair density, so it looks like his own hair cut by a barber.
@@ -209,6 +240,9 @@ Compara ambos peinados, di con honestidad y tacto si el de la referencia le favo
 No identifiques a ninguna de las personas, aunque sea famosa: habla solo del peinado. Si alguna foto no sirve, pon fotos_validas=false y explica en problema_foto.
 Escribe en español de España, tuteando, con frases claras y cortas.`;
 
-export function compareUserText({ note }) {
+export function compareUserText({ note, labels, refLabels }) {
+  if (labels && (labels.length > 1 || refLabels.length > 1)) {
+    return `Compara mi pelo con el peinado de referencia. Fotos:\n${photosLegend(labels, refLabels)}\n${MULTI_HINT} Usa también todos los ángulos de la referencia para entender el peinado completo (laterales, nuca, arriba).` + (note ? `\nNota: ${note}` : '');
+  }
   return 'Foto 1: yo. Foto 2: el peinado de referencia que quiero copiar. Compáralos.' + (note ? `\nNota: ${note}` : '');
 }

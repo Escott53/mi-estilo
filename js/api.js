@@ -94,13 +94,24 @@ export function imageCostEur(model, usage) {
 }
 
 // Coste típico estimado (para el aviso antes de pulsar).
-export function estimateEur(kind, s) {
+// extraImgs: fotos adicionales enviadas (contexto/ángulos) además de la principal.
+export function estimateEur(kind, s, extraImgs = 0) {
   if (kind === 'edit') {
     const m = s.imageModel || 'gpt-image-2';
     const base = m.startsWith('gpt-image-1-mini') ? 0.02 : 0.06;
-    return s.imageQuality === 'high' ? base * 3 : s.imageQuality === 'low' ? base / 3 : base;
+    const out = s.imageQuality === 'high' ? base * 3 : s.imageQuality === 'low' ? base / 3 : base;
+    return out + extraImgs * extraImgEur(kind, s);
   }
-  return textCostEur(s.visionModel, { input_tokens: 3500, output_tokens: kind === 'hair' ? 3500 : 3000 }) ?? 0.05;
+  return (textCostEur(s.visionModel, { input_tokens: 3500, output_tokens: kind === 'hair' ? 3500 : 3000 }) ?? 0.05) + extraImgs * extraImgEur(kind, s);
+}
+// Coste aproximado de cada foto adicional (imagen 1024 px ≈ 1.100 tokens de entrada; visión en detalle alto ≈ 1.500).
+export function extraImgEur(kind, s) {
+  if (kind === 'edit') {
+    const m = s.imageModel || 'gpt-image-2';
+    const key = Object.keys(IMAGE_PRICES).sort((a, b) => b.length - a.length).find((x) => m.startsWith(x)) || 'gpt-image-2';
+    return 1100 * IMAGE_PRICES[key][1] / 1e6 * USD_EUR;
+  }
+  return textCostEur(s.visionModel, { input_tokens: 1500, output_tokens: 0 }) ?? 0.004;
 }
 
 export function fmtEur(v) {
@@ -170,13 +181,15 @@ function pickSize(w, h) {
   return '1024x1024';
 }
 
-// refBlob opcional: segunda imagen de referencia (images/edits admite hasta 16 con image[]).
-async function editOnce({ key, model, blob, refBlob, w, h, prompt, quality, signal, minimal = false }) {
+// extra: imágenes adicionales de contexto (otros ángulos, referencias); la principal va siempre primero.
+// refBlob (compatibilidad) equivale a extra: [refBlob]. images/edits admite hasta 16 con image[].
+async function editOnce({ key, model, blob, refBlob, extra, w, h, prompt, quality, signal, minimal = false }) {
   const f = new FormData();
   f.append('model', model);
-  if (refBlob) {
+  const more = extra && extra.length ? extra : refBlob ? [refBlob] : [];
+  if (more.length) {
     f.append('image[]', blob, 'foto.jpg');
-    f.append('image[]', refBlob, 'referencia.jpg');
+    more.forEach((b, i) => f.append('image[]', b, `contexto-${i + 1}.jpg`));
     // input_fidelity solo en gpt-image-1 / 1.5 (gpt-image-2 ya es alta fidelidad; 1-mini solo "low").
     if (!minimal && /^gpt-image-1(\.5)?$/.test(model)) f.append('input_fidelity', 'high');
   } else f.append('image', blob, 'foto.jpg');
@@ -197,7 +210,7 @@ async function editOnce({ key, model, blob, refBlob, w, h, prompt, quality, sign
     return { blob: b64ToBlob(item.b64_json, type), usage: data.usage || null, model, cost: imageCostEur(model, data.usage) };
   } catch (e) {
     if (e.kind === 'bad' && !minimal && /quality|output_format|output_compression|size|input_fidelity/.test(e.param || e.raw || '')) {
-      return editOnce({ key, model, blob, refBlob, w, h, prompt, quality, signal, minimal: true });
+      return editOnce({ key, model, blob, refBlob, extra, w, h, prompt, quality, signal, minimal: true });
     }
     if (e.kind === 'model') e.message = `Tu clave no tiene acceso al modelo de imagen ${model}. Elige otro en Ajustes.`;
     throw e;

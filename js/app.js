@@ -3,7 +3,7 @@ import * as api from './api.js';
 import { prepare, thumbnail, sizeOf, blobToDataURL, PhotoError } from './image.js';
 import { LOOK_SCHEMA, LOOK_SYSTEM, lookUserText, HAIR_SCHEMA, HAIR_SYSTEM, hairUserText, HAIR_PRESETS, editPrompt, refEditPrompt, COMPARE_SCHEMA, COMPARE_SYSTEM, compareUserText } from './prompts.js';
 
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 
 // ------------------------------------------------------------------ utilidades
 const $ = (s, r = document) => r.querySelector(s);
@@ -43,8 +43,8 @@ function addStat(kind, eur) {
 const state = {
   hasKey: false, keyHint: '',
   look: { photo: null, occasion: '', weather: '', question: '' },
-  hair: { photo: null, question: '' },
-  tryOn: { photo: null, ref: null, copyColor: false, choice: null, custom: '', fromId: null },
+  hair: { set: newSet(), question: '', lastId: null },
+  tryOn: { set: newSet(), refs: newSet(), copyColor: false, alsoProfile: false, choice: null, custom: '', fromId: null },
   urls: []
 };
 function objUrl(blob) { const u = URL.createObjectURL(blob); state.urls.push(u); return u; }
@@ -254,6 +254,113 @@ function bindPicker(root, onPhoto) {
   root.addEventListener('click', (e) => { const x = e.target.closest('[data-pick="clear"]'); if (x) onPhoto(null, (x.closest('.picker') || {}).id); });
 }
 
+// ------------------------------------------------------------------ conjunto de fotos (varios ángulos)
+function newSet() { return { photos: [], main: null }; }
+const MAX_OWN = 5, MAX_REF = 3;
+const SLOTS = [['frente', 'Frente', '🤳'], ['perfil', 'Perfil', '👤'], ['atras', 'Atrás/Coronilla', '🔙']];
+const SLOT_LABEL = Object.fromEntries(SLOTS.map(([k, l]) => [k, l]));
+function slotLabel(set, p, isRef) {
+  if (isRef) return 'ángulo ' + (set.photos.indexOf(p) + 1);
+  if (SLOT_LABEL[p.slot]) return SLOT_LABEL[p.slot];
+  return 'Extra ' + (set.photos.filter((x) => x.slot === 'extra').indexOf(p) + 1);
+}
+function mainOf(set) {
+  return set.photos.find((p) => p.id === set.main) || set.photos.find((p) => p.slot === 'frente') || set.photos[0] || null;
+}
+// Principal primero, luego el resto en orden de ranura.
+function ordered(set) {
+  const m = mainOf(set); if (!m) return [];
+  const rank = (p) => { const i = SLOTS.findIndex(([k]) => k === p.slot); return i < 0 ? 9 : i; };
+  return [m, ...set.photos.filter((p) => p !== m).sort((a, b) => rank(a) - rank(b))];
+}
+function addToSet(set, p, prefer, isRef) {
+  const max = isRef ? MAX_REF : MAX_OWN;
+  if (set.photos.length >= max) return false;
+  p.id = uid();
+  if (isRef) p.slot = 'ref';
+  else {
+    const free = SLOTS.map(([k]) => k).filter((k) => !set.photos.some((x) => x.slot === k));
+    p.slot = prefer && free.includes(prefer) ? prefer : (prefer === 'extra' ? 'extra' : free[0] || 'extra');
+  }
+  set.photos.push(p);
+  return true;
+}
+
+function photoSet(id, set, { refs = false, hint } = {}) {
+  const max = refs ? MAX_REF : MAX_OWN, m = mainOf(set), n = set.photos.length;
+  const inp = (slot, cam) => `<label class="pt-b" aria-label="${cam ? 'Cámara' : 'Galería'}"><input type="file" accept="image/*" ${cam ? `capture="${refs ? 'environment' : 'user'}"` : 'multiple'} data-pick="${cam ? 'cam' : 'gal'}" data-slot="${slot}" hidden>${cam ? '📷' : '🖼️'}</label>`;
+  const filled = (p) => `<div class="pt has ${!refs && p === m && n > 1 ? 'main' : ''}" data-pid="${p.id}">
+      <img src="${p.url}" alt="${esc(slotLabel(set, p, refs))}"><span class="pt-lab">${esc(cap(slotLabel(set, p, refs)))}</span>
+      <button type="button" class="pt-x" data-pick="del" aria-label="Quitar foto">✕</button>
+      ${!refs && n > 1 ? `<button type="button" class="pt-star" data-pick="main">${p === m ? '★ Principal' : '☆ Usar como principal'}</button>` : ''}</div>`;
+  const empty = (slot, label, ic, guided) => `<div class="pt empty ${guided ? 'guided' : ''}" data-slot="${slot}"><span class="pt-ic">${ic}</span><b>${esc(label)}</b><div class="pt-btns">${inp(slot, true)}${inp(slot, false)}</div></div>`;
+  let tiles = '';
+  if (refs) {
+    tiles = set.photos.map(filled).join('') + (n < max ? empty('ref', n ? 'Otro ángulo' : 'Referencia', n ? '➕' : '💇', !n) : '');
+  } else {
+    tiles = SLOTS.map(([k, l, ic]) => { const p = set.photos.find((x) => x.slot === k); return p ? filled(p) : (n < max ? empty(k, l, ic, true) : ''); }).join('')
+      + set.photos.filter((p) => p.slot === 'extra').map(filled).join('')
+      + (n < max ? empty('extra', 'Extra', '➕', false) : '');
+  }
+  return `<div class="pset" id="${id}" data-ref="${refs ? 1 : 0}">
+    <div class="pset-grid">${tiles}</div>
+    <div class="pset-foot"><span class="muted small">${n}/${max} fotos${refs ? '' : n < 3 ? ' · recomendadas 3' : ''}</span>
+      ${n < max ? `<label class="btn btn-ghost sm"><input type="file" accept="image/*" multiple data-pick="gal" data-slot="" hidden>🖼️ Elegir varias</label>` : ''}</div>
+    ${hint ? `<p class="muted small pset-hint">${esc(hint)}</p>` : ''}
+  </div>`;
+}
+
+// sets: { [id]: { set, refs } }. onChange() se llama tras cada cambio.
+function bindSets(root, getSets, onChange) {
+  root.addEventListener('change', async (e) => {
+    const inp = e.target.closest('input[data-pick]');
+    const box = inp && inp.closest('.pset');
+    if (!box || !inp.files || !inp.files.length) return;
+    const files = [...inp.files]; inp.value = '';
+    const { set, refs } = getSets()[box.id];
+    let first = inp.dataset.slot || '', skipped = 0, bad = null;
+    for (const f of files) {
+      try {
+        const p = await prepare(f);
+        if (!addToSet(set, p, first, refs)) skipped++;
+        first = first === 'extra' ? 'extra' : '';
+      } catch (err) { bad = err; }
+    }
+    if (bad) toast(bad.message, 4200);
+    else if (skipped) toast(`Máximo ${refs ? MAX_REF : MAX_OWN} fotos: ${skipped} no se ${skipped === 1 ? 'ha' : 'han'} añadido`, 3600);
+    onChange(box.id);
+  });
+  root.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pick="del"],[data-pick="main"]');
+    const box = b && b.closest('.pset'); if (!box) return;
+    const { set } = getSets()[box.id];
+    const pid = b.closest('[data-pid]').dataset.pid;
+    if (b.dataset.pick === 'del') { set.photos = set.photos.filter((p) => p.id !== pid); if (set.main === pid) set.main = null; }
+    else { set.main = pid; toast('Foto principal: es la que se retoca'); }
+    onChange(box.id);
+  });
+}
+
+// Prepara las fotos del conjunto para enviarlas: principal a 1536 px, contexto a 1024 px.
+async function setPayload(set, isRef, ctxMax = 1024) {
+  const list = isRef ? set.photos : ordered(set);
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    const small = (isRef || i > 0) && Math.max(p.w, p.h) > ctxMax ? (await prepare(p.blob, ctxMax)).blob : p.blob;
+    out.push({ p, blob: small, label: slotLabel(set, p, isRef) });
+  }
+  return out;
+}
+async function setThumbs(items) { const o = []; for (const x of items) o.push({ label: x.label, thumb: await thumbnail(x.p.blob, 240) }); return o; }
+function strip(list, title) {
+  if (!list || !list.length) return '';
+  return `<div class="card pop set-strip"><p class="small"><b>${esc(title)}</b></p><div class="ss-row">${list.map((x) => `<figure><img src="${objUrl(x.thumb)}" alt=""><figcaption>${esc(cap(x.label))}</figcaption></figure>`).join('')}</div></div>`;
+}
+function extraNote(kind, nExtra) {
+  return nExtra ? ` · incluye ${nExtra} foto${nExtra > 1 ? 's' : ''} extra (+${api.fmtEur(nExtra * api.extraImgEur(kind, settings)).replace('≈ ', '≈')})` : '';
+}
+
 function chips(group, options, selected) {
   return `<div class="chips" data-group="${group}">${options.map(([val, label]) => `<button type="button" class="chip ${selected === val ? 'on' : ''}" data-val="${esc(val)}">${label}</button>`).join('')}</div>`;
 }
@@ -330,23 +437,25 @@ routes.look = async (v) => {
 };
 
 // ------------------------------------------------------------------ MI PELO
+const OWN_HINT = 'Frente, perfil y atrás/coronilla, con buena luz y sin gorra. Con 3 ángulos el análisis ve coronilla, laterales y nuca.';
 routes.pelo = async (v) => {
   const H = state.hair;
   const draw = () => {
-    v.innerHTML = `${header('Mi <em>pelo</em>', 'Foto de frente, de cabeza y hombros')}
+    const n = H.set.photos.length;
+    v.innerHTML = `${header('Mi <em>pelo</em>', 'Hasta 5 fotos: frente, perfil y atrás')}
       ${keyBanner()}
-      ${photoPicker('pk', H.photo, { front: true, hint: 'De frente, con buena luz (mejor junto a una ventana), sin gorra ni gafas de sol.' })}
+      ${photoSet('ps', H.set, { hint: OWN_HINT })}
       <div class="card form-card">
         <h3>¿Alguna pregunta? <small>(opcional)</small></h3>
         <textarea id="q" rows="2" maxlength="400" placeholder="Por ejemplo: ¿me dejo crecer arriba? ¿Cómo disimulo las entradas?">${esc(H.question)}</textarea>
       </div>
       <div id="err"></div>
-      <button class="btn btn-gold big wide" id="go" ${H.photo ? '' : 'disabled'}>✦ Analizar mi pelo</button>
-      <p class="cost-note">Coste aproximado por análisis: ${api.fmtEur(api.estimateEur('hair', settings))} · ${esc(settings.visionModel)}</p>`;
+      <button class="btn btn-gold big wide" id="go" ${n ? '' : 'disabled'}>✦ Analizar mi pelo${n > 1 ? ` (${n} fotos)` : ''}</button>
+      <p class="cost-note">Coste aproximado: ${api.fmtEur(api.estimateEur('hair', settings, Math.max(0, n - 1)))} · ${esc(settings.visionModel)}${extraNote('hair', Math.max(0, n - 1))}</p>`;
     $('#q', v).oninput = (e) => { H.question = e.target.value; };
     $('#go', v).onclick = runHair;
   };
-  bindPicker(v, (p) => { if (H.photo) URL.revokeObjectURL(H.photo.url); H.photo = p; draw(); });
+  bindSets(v, () => ({ ps: { set: H.set, refs: false } }), draw);
   draw();
 
   async function runHair() {
@@ -354,16 +463,20 @@ routes.pelo = async (v) => {
     let prog;
     try {
       const key = await getKeyOrFail();
-      prog = showProgress({ title: 'Analizando tu pelo', sub: 'Forma de la cara, corte, peinado y productos', estimate: [15, 45] });
-      const dataUrl = await blobToDataURL(H.photo.blob);
+      const n = H.set.photos.length;
+      prog = showProgress({ title: 'Analizando tu pelo', sub: n > 1 ? `${n} fotos: cara, coronilla, laterales y nuca` : 'Forma de la cara, corte, peinado y productos', estimate: n > 1 ? [20, 60] : [15, 45] });
+      const items = await setPayload(H.set, false);
+      const dataUrls = []; for (const x of items) dataUrls.push(await blobToDataURL(x.blob));
       const r = await api.analyze({
         key, models: [settings.visionModel, settings.visionFallback], reasoning: settings.reasoning,
-        system: HAIR_SYSTEM, userText: hairUserText(H), dataUrl, schema: HAIR_SCHEMA, schemaName: 'analisis_pelo', signal: prog.signal
+        system: HAIR_SYSTEM, userText: hairUserText({ question: H.question, labels: items.map((x) => x.label) }), dataUrls, schema: HAIR_SCHEMA, schemaName: 'analisis_pelo', signal: prog.signal
       });
       prog.done();
       addStat('hair', r.cost);
-      const item = { id: uid(), type: 'hair', date: Date.now(), photo: H.photo.blob, w: H.photo.w, h: H.photo.h, thumb: await thumbnail(H.photo.blob), result: r.result, model: r.model, cost: r.cost, ctx: { question: H.question } };
+      const m = items[0].p;
+      const item = { id: uid(), type: 'hair', date: Date.now(), photo: m.blob, w: m.w, h: m.h, thumb: await thumbnail(m.blob), set: await setThumbs(items), result: r.result, model: r.model, cost: r.cost, ctx: { question: H.question } };
       await db.histPut(item); await db.histPrune();
+      H.lastId = item.id;
       location.hash = '#/r/' + item.id;
     } catch (err) {
       prog && prog.done();
@@ -375,26 +488,32 @@ routes.pelo = async (v) => {
 };
 
 // ------------------------------------------------------------------ PROBAR PEINADO
+function setFromHist(src, sz) { const s = newSet(); s.photos.push({ id: uid(), slot: 'frente', blob: src.photo, ...sz, url: URL.createObjectURL(src.photo) }); return s; }
+const copySet = (s) => ({ photos: [...s.photos], main: s.main });
+
 routes.probar = async (v, arg) => {
-  const T = state.tryOn;
+  const T = state.tryOn, H = state.hair;
   const all = await db.histAll();
   const lastHair = all.find((x) => x.type === 'hair' && x.result && x.result.foto_valida !== false);
-  // Desde un análisis concreto: #/probar/<id>:<n>
+  const load = async (src) => {
+    // Si es el análisis recién hecho en esta sesión, se reutiliza el conjunto completo de fotos.
+    if (H.lastId === src.id && H.set.photos.length) T.set = copySet(H.set);
+    else T.set = setFromHist(src, src.w ? { w: src.w, h: src.h } : await sizeOf(src.photo));
+    T.fromId = src.id;
+  };
   if (arg) {
     const [hid, n] = arg.split(':');
     const src = all.find((x) => x.id === hid);
     if (src && src.photo) {
-      const sz = src.w ? { w: src.w, h: src.h } : await sizeOf(src.photo);
-      T.photo = { blob: src.photo, ...sz, url: URL.createObjectURL(src.photo) };
-      T.fromId = src.id;
+      await load(src);
       const cut = src.result && src.result.cortes && src.result.cortes[+n];
       if (cut) T.choice = { label: cut.nombre, text: cut.prompt_edicion || cut.descripcion };
     }
     history.replaceState(null, '', '#/probar');
-  } else if (!T.photo && lastHair && lastHair.photo) {
-    const sz = lastHair.w ? { w: lastHair.w, h: lastHair.h } : await sizeOf(lastHair.photo);
-    T.photo = { blob: lastHair.photo, ...sz, url: URL.createObjectURL(lastHair.photo) };
-    T.fromId = lastHair.id;
+  } else if (!T.set.photos.length && H.set.photos.length) {
+    T.set = copySet(H.set); T.fromId = H.lastId;
+  } else if (!T.set.photos.length && lastHair && lastHair.photo) {
+    await load(lastHair);
   }
   const srcItem = all.find((x) => x.id === T.fromId) || lastHair;
   const cuts = (srcItem && srcItem.result && srcItem.result.cortes) || [];
@@ -404,20 +523,26 @@ routes.probar = async (v, arg) => {
       ...cuts.map((c) => ({ label: c.nombre, text: c.prompt_edicion || c.descripcion, rec: true })),
       ...HAIR_PRESETS.map((p) => ({ label: p.label, text: p.text }))
     ];
+    const n = T.set.photos.length, nr = T.refs.photos.length, has = n > 0;
+    const m = mainOf(T.set), prof = T.set.photos.find((p) => p.slot === 'perfil');
+    const canProf = prof && prof !== m;
+    const editCost = (extraImgs) => api.estimateEur('edit', settings, extraImgs) * (canProf && T.alsoProfile ? 2 : 1);
+    const profNote = canProf && T.alsoProfile ? ' · ×2 por el perfil' : '';
     v.innerHTML = `${header('Probar <em>peinado</em>', 'Mira cómo te quedaría antes de ir al barbero')}
       ${keyBanner()}
-      ${photoPicker('pk', T.photo, { front: true, hint: 'Foto de frente, cabeza y hombros. Si ya analizaste tu pelo, se usa esa foto.' })}
+      ${photoSet('ps', T.set, { hint: (n > 1 ? 'Se retoca la foto ★ principal; las demás ayudan a la IA a ver tu pelo real (densidad, coronilla, entradas). ' : '') + (n ? '' : 'Si ya analizaste tu pelo, se usan esas fotos. ') + OWN_HINT })}
+      ${canProf ? `<label class="tgl"><input type="checkbox" id="prof" ${T.alsoProfile ? 'checked' : ''}> Generar también el perfil <small class="muted">(otra imagen, ${api.fmtEur(api.estimateEur('edit', settings, n - 1 + nr))} más)</small></label>` : ''}
       <div class="card form-card ref-card">
-        <h3>Foto de referencia (estilo a copiar) <small>(opcional)</small></h3>
-        <p class="muted small">Un famoso, una revista, una foto de Instagram… Copiamos su peinado en tu foto y te decimos si te favorece.</p>
-        ${photoPicker('pkr', T.ref, { hint: 'Foto donde se vea bien el peinado que te gusta.', alt: 'Referencia', icon: '💇' })}
-        ${T.ref ? `<label class="tgl"><input type="checkbox" id="col" ${T.copyColor ? 'checked' : ''}> Copiar también el color</label>` : ''}
+        <h3>Fotos de referencia (estilo a copiar) <small>(opcional, hasta 3)</small></h3>
+        <p class="muted small">Un famoso, una revista, Instagram… Varias fotos del mismo peinado desde distintos ángulos ayudan a copiarlo mejor.</p>
+        ${photoSet('pr', T.refs, { refs: true })}
+        ${nr ? `<label class="tgl"><input type="checkbox" id="col" ${T.copyColor ? 'checked' : ''}> Copiar también el color</label>` : ''}
       </div>
-      ${T.ref ? `<div id="err"></div>
-      <button class="btn btn-gold big wide" id="goref" ${T.photo ? '' : 'disabled'}>✂️ Copiar este peinado</button>
-      <p class="cost-note">Tarda 20–60 s · ${api.fmtEur(api.estimateEur('edit', settings))} · ${esc(settings.imageModel)}</p>
-      <button class="btn btn-navy big wide" id="cmp" ${T.photo ? '' : 'disabled'}>🔍 Comparar con mi pelo</button>
-      <p class="cost-note">Diferencias, si te favorece y qué pedir al barbero · ${api.fmtEur(api.estimateEur('hair', settings))}</p>
+      ${nr ? `<div id="err"></div>
+      <button class="btn btn-gold big wide" id="goref" ${has ? '' : 'disabled'}>✂️ Copiar este peinado</button>
+      <p class="cost-note">Tarda 20–60 s · ${api.fmtEur(editCost(n - 1 + nr))} · ${esc(settings.imageModel)}${extraNote('edit', n - 1 + nr)}${profNote}</p>
+      <button class="btn btn-navy big wide" id="cmp" ${has ? '' : 'disabled'}>🔍 Comparar con mi pelo</button>
+      <p class="cost-note">Diferencias, si te favorece y qué pedir al barbero · ${api.fmtEur(api.estimateEur('hair', settings, n + nr - 2))}${extraNote('hair', n + nr - 2)}</p>
       <h3 class="sec-title">…o prueba otro peinado</h3>` : ''}
       <div class="card form-card">
         <h3>Elige un peinado</h3>
@@ -426,23 +551,24 @@ routes.probar = async (v, arg) => {
         <h3>…o escríbelo tú</h3>
         <textarea id="custom" rows="2" maxlength="300" placeholder="Por ejemplo: más corto a los lados y peinado hacia atrás">${esc(T.custom)}</textarea>
       </div>
-      ${T.ref ? '' : '<div id="err"></div>'}
-      <button class="btn ${T.ref ? 'btn-ghost' : 'btn-gold'} big wide" id="go" ${T.photo ? '' : 'disabled'}>✦ Generar peinado</button>
-      <p class="cost-note">Tarda 20–60 s · coste aproximado ${api.fmtEur(api.estimateEur('edit', settings))} · ${esc(settings.imageModel)}</p>`;
+      ${nr ? '' : '<div id="err"></div>'}
+      <button class="btn ${nr ? 'btn-ghost' : 'btn-gold'} big wide" id="go" ${has ? '' : 'disabled'}>✦ Generar peinado</button>
+      <p class="cost-note">Tarda 20–60 s · coste aproximado ${api.fmtEur(editCost(n - 1))} · ${esc(settings.imageModel)}${extraNote('edit', n - 1)}${profNote}</p>`;
     $('#opts', v).onclick = (e) => {
       const b = e.target.closest('.chip'); if (!b) return;
       T.choice = opts[+b.dataset.i]; T.custom = ''; $('#custom', v).value = '';
       $$('.chip', $('#opts', v)).forEach((x) => x.classList.toggle('on', x === b));
     };
     $('#custom', v).oninput = (e) => { T.custom = e.target.value; if (T.custom.trim()) $$('.chip', $('#opts', v)).forEach((x) => x.classList.remove('on')); };
-    $('#go', v).onclick = runEdit;
-    if (T.ref) {
-      $('#goref', v).onclick = runRefEdit;
+    $('#go', v).onclick = () => runEdit(false);
+    if (canProf) $('#prof', v).onchange = (e) => { T.alsoProfile = e.target.checked; draw(); };
+    if (nr) {
+      $('#goref', v).onclick = () => runEdit(true);
       $('#cmp', v).onclick = runCompare;
       $('#col', v).onchange = (e) => { T.copyColor = e.target.checked; };
     }
   };
-  bindPicker(v, (p, pid) => { if (pid === 'pkr') T.ref = p; else { T.photo = p; T.fromId = null; } draw(); });
+  bindSets(v, () => ({ ps: { set: T.set, refs: false }, pr: { set: T.refs, refs: true } }), (id) => { if (id === 'ps') T.fromId = null; draw(); });
 
   const fail = (err, prog) => {
     prog && prog.done();
@@ -450,21 +576,37 @@ routes.probar = async (v, arg) => {
     $('#err', v).innerHTML = errorCard(err);
     $('#err', v).scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-  async function runRefEdit() {
+
+  // Edición: se retoca solo la principal; el resto de fotos propias y las referencias van como contexto.
+  async function runEdit(useRef) {
     $('#err', v).innerHTML = '';
+    const note = T.custom.trim();
+    const request = useRef ? note : note || (T.choice && T.choice.text);
+    const label = useRef ? 'Peinado de la referencia' + (T.copyColor ? ' (con color)' : '') : note || (T.choice && T.choice.label);
+    if (!useRef && !request) { toast('Elige un peinado o escribe lo que quieres'); return; }
+    const m = mainOf(T.set), prof = T.set.photos.find((p) => p.slot === 'perfil');
+    const doProf = T.alsoProfile && prof && prof !== m;
     let prog;
     try {
       const key = await getKeyOrFail();
-      prog = showProgress({ title: 'Copiando el peinado', sub: 'Aplicando la referencia a tu foto', estimate: [25, 75] });
-      const note = T.custom.trim();
-      const r = await api.editImage({
-        key, models: [settings.imageModel, settings.imageFallback], blob: T.photo.blob, refBlob: T.ref.blob, w: T.photo.w, h: T.photo.h,
-        prompt: refEditPrompt({ copyColor: T.copyColor, note }), quality: settings.imageQuality, signal: prog.signal
-      });
+      prog = showProgress({ title: useRef ? 'Copiando el peinado' : 'Creando tu nuevo peinado', sub: (useRef ? 'Aplicando la referencia a tu foto' : label) + (doProf ? ' · frente y perfil' : ''), estimate: doProf ? [45, 130] : useRef ? [25, 75] : [20, 60] });
+      const own = await setPayload(T.set, false);
+      const refs = useRef ? await setPayload(T.refs, true) : [];
+      const one = async (mainIdx) => {
+        const list = [own[mainIdx], ...own.filter((_, i) => i !== mainIdx)];
+        const main = list[0].p;
+        const ownLabels = list.map((x) => x.label), refLabels = refs.map((x) => x.label);
+        const prompt = useRef ? refEditPrompt({ copyColor: T.copyColor, note, ownLabels, refLabels }) : editPrompt(request, ownLabels);
+        return { main, r: await api.editImage({ key, models: [settings.imageModel, settings.imageFallback], blob: main.blob, extra: [...list.slice(1), ...refs].map((x) => x.blob), w: main.w, h: main.h, prompt, quality: settings.imageQuality, signal: prog.signal }) };
+      };
+      const a = await one(0);
+      addStat('edit', a.r.cost);
+      let extraRes = null;
+      if (doProf) { const b = await one(own.findIndex((x) => x.p === prof)); addStat('edit', b.r.cost); extraRes = { photo: prof.blob, after: b.r.blob, label: 'Perfil', cost: b.r.cost }; }
       prog.done();
-      addStat('edit', r.cost);
-      const label = 'Peinado de la referencia' + (T.copyColor ? ' (con color)' : '');
-      const item = { id: uid(), type: 'edit', date: Date.now(), photo: T.photo.blob, after: r.blob, ref: T.ref.blob, thumb: await thumbnail(r.blob), label, request: note, model: r.model, cost: r.cost };
+      const item = { id: uid(), type: 'edit', date: Date.now(), photo: a.main.blob, after: a.r.blob, ref: refs[0] ? refs[0].p.blob : undefined, thumb: await thumbnail(a.r.blob),
+        set: own.length > 1 ? await setThumbs(own) : undefined, refs: refs.length ? await setThumbs(refs) : undefined, extra: extraRes,
+        label, request: useRef ? note : request, model: a.r.model, cost: (a.r.cost || 0) + ((extraRes && extraRes.cost) || 0) || a.r.cost };
       await db.histPut(item); await db.histPrune();
       location.hash = '#/r/' + item.id;
     } catch (err) { fail(err, prog); }
@@ -474,46 +616,22 @@ routes.probar = async (v, arg) => {
     let prog;
     try {
       const key = await getKeyOrFail();
-      prog = showProgress({ title: 'Comparando peinados', sub: 'Tu pelo frente a la referencia', estimate: [15, 50] });
-      const dataUrls = [await blobToDataURL(T.photo.blob), await blobToDataURL(T.ref.blob)];
+      prog = showProgress({ title: 'Comparando peinados', sub: `Tu pelo (${T.set.photos.length} foto${T.set.photos.length > 1 ? 's' : ''}) frente a la referencia`, estimate: [15, 60] });
+      const own = await setPayload(T.set, false), refs = await setPayload(T.refs, true);
+      const dataUrls = []; for (const x of [...own, ...refs]) dataUrls.push(await blobToDataURL(x.blob));
       const r = await api.analyze({
         key, models: [settings.visionModel, settings.visionFallback], reasoning: settings.reasoning,
-        system: COMPARE_SYSTEM, userText: compareUserText({ note: T.custom.trim() }), dataUrls, schema: COMPARE_SCHEMA, schemaName: 'comparar_peinado', signal: prog.signal
+        system: COMPARE_SYSTEM, userText: compareUserText({ note: T.custom.trim(), labels: own.map((x) => x.label), refLabels: refs.map((x) => x.label) }), dataUrls, schema: COMPARE_SCHEMA, schemaName: 'comparar_peinado', signal: prog.signal
       });
       prog.done();
       addStat('hair', r.cost);
-      const item = { id: uid(), type: 'compare', date: Date.now(), photo: T.photo.blob, ref: T.ref.blob, thumb: await thumbnail(T.ref.blob), result: r.result, model: r.model, cost: r.cost };
+      const item = { id: uid(), type: 'compare', date: Date.now(), photo: own[0].p.blob, ref: refs[0].p.blob, thumb: await thumbnail(refs[0].p.blob),
+        set: own.length > 1 ? await setThumbs(own) : undefined, refs: refs.length > 1 ? await setThumbs(refs) : undefined, result: r.result, model: r.model, cost: r.cost };
       await db.histPut(item); await db.histPrune();
       location.hash = '#/r/' + item.id;
     } catch (err) { fail(err, prog); }
   }
   draw();
-
-  async function runEdit() {
-    $('#err', v).innerHTML = '';
-    const request = T.custom.trim() || (T.choice && T.choice.text);
-    const label = T.custom.trim() || (T.choice && T.choice.label);
-    if (!request) { toast('Elige un peinado o escribe lo que quieres'); return; }
-    let prog;
-    try {
-      const key = await getKeyOrFail();
-      prog = showProgress({ title: 'Creando tu nuevo peinado', sub: label, estimate: [20, 60] });
-      const r = await api.editImage({
-        key, models: [settings.imageModel, settings.imageFallback], blob: T.photo.blob, w: T.photo.w, h: T.photo.h,
-        prompt: editPrompt(request), quality: settings.imageQuality, signal: prog.signal
-      });
-      prog.done();
-      addStat('edit', r.cost);
-      const item = { id: uid(), type: 'edit', date: Date.now(), photo: T.photo.blob, after: r.blob, thumb: await thumbnail(r.blob), label, request, model: r.model, cost: r.cost };
-      await db.histPut(item); await db.histPrune();
-      location.hash = '#/r/' + item.id;
-    } catch (err) {
-      prog && prog.done();
-      if (err.kind === 'abort') return toast('Cancelado');
-      $('#err', v).innerHTML = errorCard(err);
-      $('#err', v).scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }
 };
 
 // ------------------------------------------------------------------ HISTORIAL
@@ -658,6 +776,7 @@ function renderHair(v, it) {
       <a class="btn btn-gold wide" href="#/probar/${it.id}:${i}">✨ Probar este corte</a></div>`).join('')}</div>
 
     ${r.barba ? `<div class="card pop"><h3 class="ch"><span>🧔</span>Barba</h3><p>${esc(r.barba)}</p></div>` : ''}
+    ${it.set && it.set.length > 1 ? strip(it.set, `Analizado con ${it.set.length} fotos`) : ''}
     ${footer(it)}`;
   $('[data-ph]', v).src = objUrl(it.photo || it.thumb);
   $('#copy', v).onclick = async () => { try { await navigator.clipboard.writeText(ba.frase || ''); toast('Frase copiada'); } catch (_) { toast('No se pudo copiar'); } };
@@ -684,6 +803,7 @@ function renderCompare(v, it) {
     <div class="card pop"><h3 class="ch"><span>🧴</span>Productos</h3>
       ${(r.productos || []).map((p) => `<div class="prod"><h4>${esc(p.producto)}</h4><p class="small"><b>Cantidad:</b> ${esc(p.cantidad)}</p><p class="tip">👉 ${esc(p.como)}</p></div>`).join('')}</div>
     <div class="card pop"><h3 class="ch"><span>🗓️</span>Mantenimiento</h3><p>${esc(r.mantenimiento)}</p></div>
+    ${strip(it.set, 'Tus fotos')}${strip(it.refs, 'Referencias')}
     <a class="btn btn-gold big wide" href="#/probar">✂️ Probar este peinado en mi foto</a>
     ${footer(it)}`;
   $('#copy', v).onclick = async () => { try { await navigator.clipboard.writeText(ba.frase || ''); toast('Frase copiada'); } catch (_) { toast('No se pudo copiar'); } };
@@ -702,7 +822,10 @@ function renderEdit(v, it) {
     <p class="muted small center">Desliza para comparar antes y después</p>
     <div class="row2"><button class="btn btn-navy big" id="save">⬇️ Guardar</button><button class="btn btn-gold big" id="share">📤 Compartir</button></div>
     <div class="row2"><button class="btn btn-ghost big" id="only">👁️ Ver solo después</button><a class="btn btn-ghost big" href="#/probar">✨ Probar otro</a></div>
-    ${it.ref ? `<div class="card pop ref-thumb"><img src="${objUrl(it.ref)}" alt="Referencia"><div><p class="small"><b>Referencia copiada</b></p><p class="small muted">Peinado adaptado a tu cabeza y entradas.</p></div></div>` : ''}
+    ${it.extra ? `<h3 class="sec-title">También de perfil</h3><div class="pair pop"><figure><img src="${objUrl(it.extra.photo)}" alt="Perfil antes"><figcaption>Antes</figcaption></figure><figure><img src="${objUrl(it.extra.after)}" alt="Perfil después"><figcaption>Después</figcaption></figure></div>` : ''}
+    ${strip(it.set, 'Fotos usadas como contexto (la ★ primera es la retocada)')}
+    ${it.refs && it.refs.length > 1 ? strip(it.refs, 'Referencias copiadas') : ''}
+    ${it.ref && !(it.refs && it.refs.length > 1) ? `<div class="card pop ref-thumb"><img src="${objUrl(it.ref)}" alt="Referencia"><div><p class="small"><b>Referencia copiada</b></p><p class="small muted">Peinado adaptado a tu cabeza y entradas.</p></div></div>` : ''}
     <div class="card pop"><p class="small"><b>Peinado:</b> ${esc(it.label || '')}</p><p class="small muted">Es una simulación hecha por IA: úsala como idea para hablar con tu barbero.</p></div>
     ${footer(it)}`;
   const ba = $('#ba', v), bar = $('#bar', v);
